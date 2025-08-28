@@ -4,6 +4,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 import os
 import re
+from datetime import datetime
 
 def verificar_dependencias():
     """Verifica se as bibliotecas necessárias estão instaladas"""
@@ -25,7 +26,8 @@ def verificar_dependencias():
             print(f"   - {lib}")
         print("\n💡 Para instalar as bibliotecas faltando, execute:")
         print(f"pip install {' '.join(bibliotecas_faltando)}")
-        print("\nO programa continuará, mas pode ter limitações na leitura de arquivos Excel.\n")
+        return False
+    return True
 
 def processar_formato_valor_sicoob(valor_str):
     """
@@ -38,13 +40,14 @@ def processar_formato_valor_sicoob(valor_str):
     valor_str = str(valor_str).strip()
     
     # Ignora valores vazios
-    if not valor_str:
+    if not valor_str or valor_str == "nan":
         return None
     
     # Remove espaços extras
     valor_str = re.sub(r'\s+', ' ', valor_str)
     
     # Padrão para formato Sicoob: opcionalmente "- " seguido de número com vírgula e " D" ou " C"
+    # Exemplos: "- 125,69 D", "2.794,76 C", "- 2.460,73 D"
     padrao = r'^-?\s*(\d{1,3}(?:\.\d{3})*,\d{2})\s*([DC])$'
     match = re.match(padrao, valor_str)
     
@@ -60,23 +63,144 @@ def processar_formato_valor_sicoob(valor_str):
         # Se for crédito (C), retorna None (pois não queremos incluir)
         if tipo == 'D':
             return valor_numerico
-        else:
-            return None  # Créditos são ignorados
+        elif tipo == 'C':
+            return None  # Créditos são explicitamente ignorados
     
     # Se não conseguiu processar no formato Sicoob, tenta formato genérico
     try:
-        # Remove tudo que não é dígito, vírgula ou ponto
+        # Verifica se tem indicador de crédito
+        if 'C' in valor_str.upper():
+            return None  # Ignora créditos
+        
+        # Remove tudo que não é dígito, vírgula, ponto ou sinal de menos
         valor_limpo = re.sub(r'[^\d.,-]', '', valor_str)
         if valor_limpo:
             valor_limpo = valor_limpo.replace(',', '.')
             valor_numerico = float(valor_limpo)
-            # Se tinha sinal de menos no original, considera como débito
-            if '-' in valor_str:
+            # Se tinha sinal de menos no original ou não tem indicador de crédito, considera como débito
+            if '-' in valor_str or 'D' in valor_str.upper():
                 return valor_numerico
     except:
         pass
     
     return None
+
+def adicionar_dados_preservando_formatacao(caminho_planilha, novos_dados):
+    """
+    Adiciona novos dados à planilha preservando toda a formatação original
+    """
+    try:
+        from openpyxl import load_workbook
+        from openpyxl.styles import NamedStyle
+        from openpyxl.utils import get_column_letter
+        
+        print("🎨 Carregando planilha preservando formatação...")
+        
+        # Carrega a planilha mantendo formatação
+        wb = load_workbook(caminho_planilha)
+        ws = wb['Banco']
+        
+        # Encontra a primeira linha vazia (após os dados existentes)
+        linha_inicio = 1
+        while linha_inicio <= ws.max_row:
+            # Verifica se a linha está completamente vazia
+            linha_vazia = True
+            for col in range(1, 8):  # Colunas A até G
+                cell_value = ws.cell(row=linha_inicio, column=col).value
+                if cell_value is not None and str(cell_value).strip() != "":
+                    linha_vazia = False
+                    break
+            
+            if linha_vazia and linha_inicio > 1:  # Não conta a linha de cabeçalho
+                break
+            linha_inicio += 1
+        
+        print(f"📍 Iniciando inserção na linha {linha_inicio}")
+        
+        # Copia a formatação da linha de cabeçalho ou da última linha com dados
+        linha_formato_referencia = 1 if linha_inicio <= 2 else linha_inicio - 1
+        
+        # Adiciona os novos dados
+        for i, (index, row) in enumerate(novos_dados.iterrows()):
+            linha_atual = linha_inicio + i
+            
+            # Data Vencimento (Coluna A)
+            cell_data = ws.cell(row=linha_atual, column=1)
+            try:
+                # Converte string para data se necessário
+                if isinstance(row['Data Vencimento'], str):
+                    data_obj = datetime.strptime(row['Data Vencimento'], '%d/%m/%Y')
+                    cell_data.value = data_obj
+                else:
+                    cell_data.value = row['Data Vencimento']
+                # Aplica formatação de data
+                cell_data.number_format = 'DD/MM/YYYY'
+            except:
+                cell_data.value = row['Data Vencimento']
+            
+            # Descrição (Coluna B)
+            ws.cell(row=linha_atual, column=2, value=row['Descrição'])
+            
+            # Valor (Coluna C) - com formatação de moeda brasileira
+            cell_valor = ws.cell(row=linha_atual, column=3)
+            try:
+                cell_valor.value = float(row['Valor'])
+                cell_valor.number_format = 'R$ #,##0.00'
+            except:
+                cell_valor.value = row['Valor']
+            
+            # Fornecedor (Coluna D)
+            ws.cell(row=linha_atual, column=4, value=row['Fornecedor'])
+            
+            # Numero Docto (Coluna E)
+            ws.cell(row=linha_atual, column=5, value=row['Numero Docto'])
+            
+            # Conta Contábil (Coluna F)
+            ws.cell(row=linha_atual, column=6, value=row['Conta Contábil'])
+            
+            # Observação (Coluna G)
+            ws.cell(row=linha_atual, column=7, value=row['Observação (opcional)'])
+            
+            # Copia formatação da linha de referência (borda, alinhamento, etc.)
+            if linha_formato_referencia > 0:
+                for col in range(1, 8):
+                    cell_origem = ws.cell(row=linha_formato_referencia, column=col)
+                    cell_destino = ws.cell(row=linha_atual, column=col)
+                    
+                    # Copia formatação (exceto número que já definimos)
+                    if cell_origem.font:
+                        cell_destino.font = cell_origem.font
+                    if cell_origem.border:
+                        cell_destino.border = cell_origem.border
+                    if cell_origem.fill:
+                        cell_destino.fill = cell_origem.fill
+                    if cell_origem.alignment:
+                        cell_destino.alignment = cell_origem.alignment
+        
+        # Ajusta largura das colunas se necessário
+        for column in ws.columns:
+            max_length = 0
+            column_letter = get_column_letter(column[0].column)
+            
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            
+            adjusted_width = min(max_length + 2, 50)  # Máximo de 50
+            ws.column_dimensions[column_letter].width = adjusted_width
+        
+        # Salva a planilha
+        wb.save(caminho_planilha)
+        print(f"✅ Dados adicionados preservando formatação original!")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro ao preservar formatação: {e}")
+        return False
 
 def processar_extrato_e_transferir():
     """
@@ -189,9 +313,8 @@ def processar_extrato_e_transferir():
                     "3. Verifique se o arquivo não está corrompido"
                 )
             
-        # Lê todas as abas da planilha fixa de uma vez
-        all_sheets = pd.read_excel(caminho_planilha_fixa, sheet_name=None, engine='openpyxl')
-        df_banco = all_sheets['Banco']
+        # Lê apenas os dados existentes da planilha fixa para comparação (sem formatação)
+        df_banco = pd.read_excel(caminho_planilha_fixa, sheet_name='Banco', engine='openpyxl')
         
         # --- 2. PREPARO DOS DADOS DO EXTRATO ---
         # Reorganiza para ter sempre as 4 colunas principais
@@ -225,11 +348,12 @@ def processar_extrato_e_transferir():
         
         print(f"📊 Arquivo carregado: {len(df_extrato)} linhas, {df_extrato.shape[1]} colunas")
         
-        # --- 3. CONSOLIDANDO A DESCRIÇÃO LINHA POR LINHA (VERSÃO MELHORADA PARA SICOOB) ---
+        # --- 3. CONSOLIDANDO A DESCRIÇÃO LINHA POR LINHA (VERSÃO CORRIGIDA PARA CRÉDITOS) ---
         registros_consolidados = []
         historico_atual = ""
         linha_principal = None
         transacoes_processadas = 0
+        linhas_credito_ignoradas = 0
         
         print("🔄 Processando e consolidando transações...")
         
@@ -237,37 +361,76 @@ def processar_extrato_e_transferir():
             # Converte valores para string para processamento
             data_str = str(row['DATA']).strip() if pd.notna(row['DATA']) else ""
             historico_str = str(row['HISTORICO']).strip() if pd.notna(row['HISTORICO']) else ""
+            valor_str = str(row['VALOR']).strip() if pd.notna(row['VALOR']) else ""
             
-            # Se tem DATA válida, é uma linha principal de transação
+            # Se tem DATA válida, pode ser uma linha principal de transação
             if data_str and data_str != "" and data_str != "nan":
+                
+                # PRIMEIRO: Verifica se esta linha tem crédito ou deve ser ignorada
+                eh_credito = False
+                eh_saldo = False
+                
+                # Verifica se é uma linha de crédito (termina com "C")
+                if valor_str and ("C" in valor_str or "c" in valor_str.lower()):
+                    eh_credito = True
+                
+                # Verifica se é uma linha de saldo (mesmo sem valor)
+                frases_saldo = ['SALDO DO DIA', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL']
+                for frase in frases_saldo:
+                    if frase.lower() in historico_str.lower():
+                        eh_saldo = True
+                        break
+                
+                # Se for crédito ou saldo, ignora esta linha completamente
+                if eh_credito or eh_saldo:
+                    linhas_credito_ignoradas += 1
+                    print(f"🚫 Ignorando linha de crédito/saldo: {historico_str[:50]}{'...' if len(historico_str) > 50 else ''}")
+                    continue  # Pula esta linha sem fazer nada
+                
+                # Se chegou aqui, é uma transação de débito válida
                 # Se já tínhamos uma linha principal anterior, salva ela
                 if linha_principal is not None:
                     linha_principal['HISTORICO'] = historico_atual.strip()
                     registros_consolidados.append(linha_principal.copy())
                     transacoes_processadas += 1
                 
-                # Inicia uma nova linha principal
+                # Inicia uma nova linha principal (apenas se não for crédito/saldo)
                 linha_principal = row.copy()
                 historico_atual = historico_str
                 
             # Se não tem DATA, é uma linha de continuação da descrição
             elif linha_principal is not None and historico_str and historico_str != "":
-                # Adiciona o conteúdo ao histórico atual (com espaço)
-                if historico_atual:
-                    historico_atual += " " + historico_str
-                else:
-                    historico_atual = historico_str
+                # Verifica se esta continuação também não é uma linha de saldo
+                eh_continuacao_saldo = False
+                frases_saldo = ['SALDO DO DIA', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL']
+                for frase in frases_saldo:
+                    if frase.lower() in historico_str.lower():
+                        eh_continuacao_saldo = True
+                        break
+                
+                if not eh_continuacao_saldo:
+                    # Adiciona o conteúdo ao histórico atual (com espaço)
+                    if historico_atual:
+                        historico_atual += " " + historico_str
+                    else:
+                        historico_atual = historico_str
         
-        # Não esqueça de adicionar a última linha
+        # Não esqueça de adicionar a última linha (se não for crédito)
         if linha_principal is not None:
             linha_principal['HISTORICO'] = historico_atual.strip()
             registros_consolidados.append(linha_principal.copy())
             transacoes_processadas += 1
         
-        print(f"🔄 Transações consolidadas: {transacoes_processadas}")
+        print(f"🚫 Linhas de crédito/saldo ignoradas durante consolidação: {linhas_credito_ignoradas}")
+        print(f"🔄 Transações de débito consolidadas: {transacoes_processadas}")
         
         # Converte a lista de volta para DataFrame
         df_extrato_consolidado = pd.DataFrame(registros_consolidados)
+        
+        if df_extrato_consolidado.empty:
+            print("⚠️ Nenhuma transação de débito foi encontrada após consolidação")
+            messagebox.showinfo("Aviso", "Nenhuma transação de débito válida foi encontrada no extrato.")
+            return True
 
         # --- 4. FILTRAR DADOS INDESEJADOS (SALDO, ETC.) ---
         frases_a_ignorar = [
@@ -285,7 +448,7 @@ def processar_extrato_e_transferir():
             ]
         
         linhas_filtradas = linhas_antes_filtro - len(df_extrato_consolidado)
-        print(f"🚫 Linhas de saldo ignoradas: {linhas_filtradas}")
+        print(f"🚫 Linhas de saldo ignoradas no filtro adicional: {linhas_filtradas}")
 
         # --- 5. PROCESSAMENTO ESPECÍFICO DOS VALORES DO SICOOB ---
         df_extrato_consolidado = df_extrato_consolidado.dropna(subset=['DATA'])
@@ -297,16 +460,24 @@ def processar_extrato_e_transferir():
         print("💰 Processando valores no formato Sicoob...")
         valores_processados = []
         valores_validos = 0
+        valores_credito_ignorados = 0
         
         for index, row in df_extrato_consolidado.iterrows():
-            valor_processado = processar_formato_valor_sicoob(row['VALOR'])
+            valor_original = row['VALOR']
+            valor_processado = processar_formato_valor_sicoob(valor_original)
             valores_processados.append(valor_processado)
+            
             if valor_processado is not None:
                 valores_validos += 1
+                print(f"✅ Débito: {valor_original} → R$ {valor_processado:.2f}")
+            elif str(valor_original).strip() and 'C' in str(valor_original).upper():
+                valores_credito_ignorados += 1
+                print(f"🚫 Crédito ignorado: {valor_original}")
         
         df_extrato_consolidado['VALOR_PROCESSADO'] = valores_processados
         
         print(f"💰 Valores de débito processados: {valores_validos}")
+        print(f"🚫 Valores de crédito ignorados: {valores_credito_ignorados}")
         
         # --- 6. FILTRAR APENAS VALORES DE DÉBITO VÁLIDOS ---
         df_extrato_debitos = df_extrato_consolidado[df_extrato_consolidado['VALOR_PROCESSADO'].notna()].copy()
@@ -363,25 +534,26 @@ def processar_extrato_e_transferir():
             messagebox.showinfo("Aviso", "Não há novas transações para adicionar. A planilha está atualizada.")
             return True
             
-        # --- 9. ADICIONANDO OS DADOS E SALVANDO NA PLANILHA FIXA ---
-        df_banco_atualizado = pd.concat([df_banco, novos_lancamentos_sem_duplicatas], ignore_index=True)
-
-        # Ordenar por data
-        try:
-            df_banco_atualizado['Data Vencimento'] = pd.to_datetime(df_banco_atualizado['Data Vencimento'], dayfirst=True, errors='coerce')
-            df_banco_atualizado.sort_values(by='Data Vencimento', inplace=True)
-        except:
-            pass
+        # --- 9. ADICIONANDO OS DADOS PRESERVANDO FORMATAÇÃO ---
+        print("🎨 Adicionando dados preservando formatação original...")
         
-        # Salvar na planilha preservando outras abas
-        with pd.ExcelWriter(caminho_planilha_fixa, engine='openpyxl', mode='w') as writer:
-            # Primeiro, salva a aba 'Banco' atualizada
-            df_banco_atualizado.to_excel(writer, sheet_name='Banco', index=False)
-            
-            # Em seguida, salva as outras abas
-            for sheet_name, df_sheet in all_sheets.items():
-                if sheet_name != 'Banco':
-                    df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
+        sucesso_formatacao = adicionar_dados_preservando_formatacao(
+            caminho_planilha_fixa, 
+            novos_lancamentos_sem_duplicatas
+        )
+        
+        if not sucesso_formatacao:
+            # Fallback: usar pandas se falhar a preservação de formatação
+            print("⚠️ Fallback: usando método padrão sem preservar formatação completa")
+            all_sheets = pd.read_excel(caminho_planilha_fixa, sheet_name=None, engine='openpyxl')
+            df_banco_atualizado = pd.concat([df_banco, novos_lancamentos_sem_duplicatas], ignore_index=True)
+
+            # Salvar na planilha preservando outras abas
+            with pd.ExcelWriter(caminho_planilha_fixa, engine='openpyxl', mode='w') as writer:
+                df_banco_atualizado.to_excel(writer, sheet_name='Banco', index=False)
+                for sheet_name, df_sheet in all_sheets.items():
+                    if sheet_name != 'Banco':
+                        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
 
         # Mostrar exemplos dos lançamentos adicionados
         print(f"\n📋 Exemplos dos lançamentos adicionados:")
@@ -394,9 +566,11 @@ def processar_extrato_e_transferir():
         messagebox.showinfo("Sucesso", 
                             "✅ Automação concluída!\n\n"
                             f"📊 Transações processadas do extrato: {transacoes_processadas}\n"
+                            f"🚫 Linhas de crédito/saldo ignoradas: {linhas_credito_ignoradas + valores_credito_ignorados}\n"
                             f"💰 Transações de débito encontradas: {len(df_extrato_debitos)}\n"
-                            f"🚫 Duplicatas ignoradas: {duplicatas_encontradas}\n"
-                            f"➕ Novos lançamentos adicionados: {len(novos_lancamentos_sem_duplicatas)}\n\n"
+                            f"🔍 Duplicatas ignoradas: {duplicatas_encontradas}\n"
+                            f"➕ Novos lançamentos adicionados: {len(novos_lancamentos_sem_duplicatas)}\n"
+                            f"🎨 Formatação original preservada!\n\n"
                             f"O arquivo 'Automação_Gransoft.xlsx' foi atualizado com sucesso.")
         
         return True
@@ -428,7 +602,10 @@ def processar_extrato_e_transferir():
 # Executa o processo principal
 if __name__ == "__main__":
     print("🚀 Iniciando verificação do sistema...")
-    verificar_dependencias()
+    if not verificar_dependencias():
+        print("❌ Dependências necessárias não estão instaladas!")
+        input("Pressione ENTER para sair...")
+        exit()
     
     print("📊 Iniciando processamento de extrato bancário...")
     processar_extrato_e_transferir()

@@ -62,45 +62,43 @@ def obter_caminho_recurso(nome_arquivo):
 def criar_planilha_usuario(nome_sugerido=None):
     """
     Cria uma nova planilha para o usuário baseada no template embutido
+    ou cria uma básica se o template não estiver disponível.
     """
     root = tk.Tk()
     root.withdraw()
-    
-    # Nome padrão baseado na sugestão ou timestamp
+
     if nome_sugerido:
         nome_default = nome_sugerido
     else:
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         nome_default = f"Planilha_Sicoob_{timestamp}.xlsx"
-    
-    # Pergunta onde salvar a nova planilha
+
     caminho_destino = filedialog.asksaveasfilename(
         title="Onde salvar a planilha?",
         defaultextension=".xlsx",
         filetypes=[("Excel files", "*.xlsx")],
-        initialvalue=nome_default
+        initialfile=nome_default
     )
-    
+
     if not caminho_destino:
         return None
-    
+
     try:
-        # Obtém o caminho do template embutido
-        caminho_template = obter_caminho_recurso('Automacao_Gransoft.xlsx')
+        caminho_template = obter_caminho_recurso('Automação_Gransoft.xlsx')
         
-        if not os.path.exists(caminho_template):
-            # Se não encontrar o template embutido, cria um básico
+        if os.path.exists(caminho_template):
+            # Copia o template. Se a cópia for bem-sucedida, o arquivo está pronto.
+            shutil.copy2(caminho_template, caminho_destino)
+            print(f"✅ Nova planilha criada a partir do template: {os.path.basename(caminho_destino)}")
+        else:
+            # Se o template não existe, cria uma planilha básica do zero.
             print("⚠️ Template não encontrado. Criando planilha básica...")
             criar_planilha_basica(caminho_destino)
-        else:
-            # Copia o template para o local escolhido
-            shutil.copy2(caminho_template, caminho_destino)
-            print(f"✅ Nova planilha criada: {os.path.basename(caminho_destino)}")
-        
+            
         return caminho_destino
-        
+
     except Exception as e:
-        print(f"❌ Erro ao criar planilha: {e}")
+        print(f"❌ Erro ao criar a planilha: {e}")
         return None
 
 def criar_planilha_basica(caminho_destino):
@@ -335,7 +333,8 @@ def adicionar_dados_preservando_formatacao(caminho_planilha, novos_dados):
 
 def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, mostrar_detalhes=True):
     """
-    Processa um único extrato e adiciona à planilha especificada
+    Processa um único extrato e adiciona apenas na aba 'Banco' da planilha.
+    NÃO altera a aba 'Base de dados'.
     """
     try:
         if mostrar_detalhes:
@@ -343,20 +342,17 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
 
         # --- 1. LEITURA ROBUSTA DO EXTRATO ---
         df_extrato = None
-        
-        # Primeiro tenta ler como Excel
         try:
             df_extrato = pd.read_excel(caminho_extrato, skiprows=1, header=0)
             if mostrar_detalhes:
                 print("✅ Arquivo lido como Excel")
         except ImportError:
             if mostrar_detalhes:
-                print("⚠️ Biblioteca 'openpyxl' não está instalada. Tentando como CSV...")
+                print("⚠️ 'openpyxl' não instalada. Tentando CSV...")
         except Exception as excel_error:
             if mostrar_detalhes:
                 print(f"⚠️ Erro ao ler como Excel: {excel_error}")
-            
-        # Se não conseguiu ler como Excel, tenta CSV com diferentes encodings
+
         if df_extrato is None:
             csv_lido = False
             estrategias_csv = [
@@ -368,229 +364,155 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
                 {'sep': ',', 'quotechar': '"', 'encoding': None},
                 {'sep': ',', 'quotechar': '"', 'encoding': 'utf-8'},
             ]
-            
             for i, estrategia in enumerate(estrategias_csv):
                 try:
                     if mostrar_detalhes:
-                        print(f"🔄 Tentando estratégia CSV {i+1} (encoding: {estrategia.get('encoding', 'auto')})...")
-                    
-                    # Se encoding for None, tenta detectar automaticamente
+                        print(f"🔄 Tentando CSV {i+1} (encoding: {estrategia.get('encoding', 'auto')})...")
                     if estrategia['encoding'] is None:
                         try:
                             import chardet
                             with open(caminho_extrato, 'rb') as f:
-                                raw_data = f.read()
-                                result = chardet.detect(raw_data)
-                                detected_encoding = result['encoding']
-                                estrategia['encoding'] = detected_encoding
-                                if mostrar_detalhes:
-                                    print(f"🔍 Encoding detectado: {detected_encoding}")
-                        except ImportError:
+                                detected_encoding = chardet.detect(f.read())['encoding']
+                                estrategia['encoding'] = detected_encoding or 'windows-1252'
                             if mostrar_detalhes:
-                                print("⚠️ Biblioteca 'chardet' não disponível, usando fallback")
-                            estrategia['encoding'] = 'windows-1252'
+                                print(f"🔍 Encoding detectado: {estrategia['encoding']}")
                         except Exception:
                             estrategia['encoding'] = 'windows-1252'
-                    
-                    df_extrato = pd.read_csv(
-                        caminho_extrato, 
-                        skiprows=1, 
+
+                    df_tmp = pd.read_csv(
+                        caminho_extrato,
+                        skiprows=1,
                         header=None,
-                        on_bad_lines='skip',  # Pula linhas problemáticas
-                        engine='python',      # Mais flexível
+                        on_bad_lines='skip',
+                        engine='python',
                         **estrategia
                     )
-                    
-                    # Verifica se conseguiu ler dados válidos
-                    if not df_extrato.empty and df_extrato.shape[1] >= 3:
+                    if not df_tmp.empty and df_tmp.shape[1] >= 3:
+                        df_extrato = df_tmp
                         if mostrar_detalhes:
-                            print(f"✅ Arquivo lido como CSV com estratégia {i+1} (encoding: {estrategia['encoding']})")
+                            print(f"✅ CSV lido com estratégia {i+1} (encoding: {estrategia['encoding']})")
                         csv_lido = True
                         break
-                        
                 except Exception as csv_error:
                     if mostrar_detalhes:
-                        print(f"❌ Estratégia CSV {i+1} falhou: {csv_error}")
-                    continue
-            
+                        print(f"❌ CSV {i+1} falhou: {csv_error}")
             if not csv_lido:
                 raise Exception(
-                    "Não foi possível ler o arquivo em nenhum formato suportado.\n\n"
-                    "Soluções possíveis:\n"
-                    "1. Certifique-se que o arquivo é um extrato válido do Sicoob\n"
-                    "2. Tente salvar o extrato em formato .xlsx (Excel)\n"
-                    "3. Verifique se o arquivo não está corrompido"
+                    "Não foi possível ler o arquivo em nenhum formato suportado.\n"
+                    "Verifique se é um extrato válido do Sicoob."
                 )
-            
-        # Lê apenas os dados existentes da planilha do usuário para comparação
-        df_banco = pd.read_excel(caminho_planilha_usuario, sheet_name='Banco', engine='openpyxl')
-        
+
+        # --- 1.1 Ler a aba 'Banco' para checar duplicidade (se existir) ---
+        colunas_banco = ['Data Vencimento','Descrição','Valor','Fornecedor','Numero Docto','Conta Contábil','Observação (opcional)']
+        try:
+            df_banco = pd.read_excel(caminho_planilha_usuario, sheet_name='Banco', engine='openpyxl')
+            # se vier sem as colunas esperadas, tentamos alinhar
+            for c in colunas_banco:
+                if c not in df_banco.columns:
+                    df_banco[c] = None
+            df_banco = df_banco[colunas_banco]
+        except Exception:
+            # se a aba não existir ou der erro, consideramos vazia
+            df_banco = pd.DataFrame(columns=colunas_banco)
+
         # --- 2. PREPARO DOS DADOS DO EXTRATO ---
         colunas_necessarias = ['DATA', 'DOCUMENTO', 'HISTORICO', 'VALOR']
-        
-        # Define as colunas baseado no que foi lido
         if df_extrato.shape[1] >= 4:
-            df_extrato.columns = ['DATA', 'DOCUMENTO', 'HISTORICO', 'VALOR'] + [f'EXTRA_{i}' for i in range(df_extrato.shape[1] - 4)]
+            df_extrato.columns = ['DATA','DOCUMENTO','HISTORICO','VALOR'] + [f'EXTRA_{i}' for i in range(df_extrato.shape[1]-4)]
         elif df_extrato.shape[1] == 3:
-            df_extrato.columns = ['DATA', 'HISTORICO', 'VALOR']
+            df_extrato.columns = ['DATA','HISTORICO','VALOR']
             df_extrato['DOCUMENTO'] = ''
         else:
-            raise Exception(f"Arquivo tem estrutura inesperada com {df_extrato.shape[1]} colunas")
-        
-        for coluna in colunas_necessarias:
-            if coluna not in df_extrato.columns:
-                df_extrato[coluna] = ''
-        
-        # Seleciona apenas as colunas necessárias
+            raise Exception(f"Estrutura inesperada com {df_extrato.shape[1]} colunas.")
+
+        for c in colunas_necessarias:
+            if c not in df_extrato.columns:
+                df_extrato[c] = ''
+
         df_extrato = df_extrato[colunas_necessarias].copy()
-        
-        # Validação básica dos dados
         if df_extrato.empty:
-            raise Exception("O arquivo está vazio ou não contém dados válidos")
-        
+            raise Exception("Arquivo vazio ou sem dados válidos.")
         df_extrato = df_extrato.dropna(how='all')
-        
         if len(df_extrato) == 0:
-            raise Exception("Não foram encontrados dados válidos no arquivo após limpeza")
-        
-        # --- 3. CONSOLIDANDO DESCRIÇÕES ---
+            raise Exception("Sem dados válidos após limpeza.")
+
+        # --- 3. CONSOLIDAÇÃO DE DESCRIÇÕES (ignora créditos/saldos) ---
         registros_consolidados = []
         historico_atual = ""
         linha_principal = None
         transacoes_processadas = 0
-        linhas_credito_ignoradas = 0
         ignorando_continuacoes_credito = False
-        
-        for index, row in df_extrato.iterrows():
+
+        for _, row in df_extrato.iterrows():
             data_str = str(row['DATA']).strip() if pd.notna(row['DATA']) else ""
-            historico_str = str(row['HISTORICO']).strip() if pd.notna(row['HISTORICO']) else ""
+            hist_str = str(row['HISTORICO']).strip() if pd.notna(row['HISTORICO']) else ""
             valor_str = str(row['VALOR']).strip() if pd.notna(row['VALOR']) else ""
-            
-            # Se tem DATA válida, pode ser uma linha principal de transação
-            if data_str and data_str != "" and data_str != "nan":
+
+            if data_str and data_str != "nan":
                 ignorando_continuacoes_credito = False
-                
-                # Verifica se é crédito ou saldo
-                eh_credito = False
-                eh_saldo = False
-                
-                if valor_str and ("C" in valor_str or "c" in valor_str.lower()):
-                    eh_credito = True
-                
-                frases_saldo = ['SALDO DO DIA', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL']
-                for frase in frases_saldo:
-                    if frase.lower() in historico_str.lower():
-                        eh_saldo = True
-                        break
-                
-                # Se for crédito ou saldo, ignora esta linha E suas continuações
+                eh_credito = bool(valor_str) and ('C' in valor_str.upper())
+                frases_saldo = ['SALDO DO DIA','SALDO ANTERIOR','SALDO ATUAL','SALDO FINAL']
+                eh_saldo = any(f.lower() in hist_str.lower() for f in frases_saldo)
+
                 if eh_credito or eh_saldo:
-                    linhas_credito_ignoradas += 1
                     ignorando_continuacoes_credito = True
                     continue
-                
-                # Se já tínhamos uma linha principal anterior, salva ela
+
                 if linha_principal is not None:
                     linha_principal['HISTORICO'] = historico_atual.strip()
                     registros_consolidados.append(linha_principal.copy())
                     transacoes_processadas += 1
-                
-                # Inicia uma nova linha principal
+
                 linha_principal = row.copy()
-                historico_atual = historico_str
-                
-            # Se não tem DATA, é uma linha de continuação da descrição
-            elif historico_str and historico_str != "":
-                # Se estamos ignorando continuações de crédito, pula esta linha
+                historico_atual = hist_str
+
+            elif hist_str:
                 if ignorando_continuacoes_credito:
                     continue
-                
-                # Se temos uma linha principal válida (débito), adiciona a continuação
                 if linha_principal is not None:
-                    # Verifica se esta continuação não é uma linha de saldo
-                    eh_continuacao_saldo = False
-                    frases_saldo = ['SALDO DO DIA', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL']
-                    for frase in frases_saldo:
-                        if frase.lower() in historico_str.lower():
-                            eh_continuacao_saldo = True
-                            break
-                    
-                    if not eh_continuacao_saldo:
-                        if historico_atual:
-                            historico_atual += " " + historico_str
-                        else:
-                            historico_atual = historico_str
-        
-        # Adiciona a última linha
+                    frases_saldo = ['SALDO DO DIA','SALDO ANTERIOR','SALDO ATUAL','SALDO FINAL']
+                    if not any(f.lower() in hist_str.lower() for f in frases_saldo):
+                        historico_atual = (historico_atual + " " + hist_str).strip() if historico_atual else hist_str
+
         if linha_principal is not None:
             linha_principal['HISTORICO'] = historico_atual.strip()
             registros_consolidados.append(linha_principal.copy())
             transacoes_processadas += 1
-        
-        # Converte a lista de volta para DataFrame
+
         df_extrato_consolidado = pd.DataFrame(registros_consolidados)
-        
         if df_extrato_consolidado.empty:
             if mostrar_detalhes:
-                print("⚠️ Nenhuma transação de débito foi encontrada após consolidação")
-            return {
-                'sucesso': True,
-                'transacoes_processadas': 0,
-                'debitos_encontrados': 0,
-                'novos_lancamentos': 0,
-                'duplicatas_ignoradas': 0
-            }
+                print("⚠️ Nenhuma transação de débito após consolidação")
+            return {'sucesso': True, 'transacoes_processadas': 0, 'debitos_encontrados': 0,
+                    'novos_lancamentos': 0, 'duplicatas_ignoradas': 0}
 
         # --- 4. FILTROS ADICIONAIS ---
-        frases_a_ignorar = [
-            'SALDO DO DIA', 'SALDO ANTERIOR', 'SALDO ATUAL', 'SALDO FINAL',
-            'saldo do dia', 'saldo anterior', 'saldo atual', 'saldo final',
-            'Saldo bloqueado anterior', 'Saldo bloqueado', 'Saldo disponível', 'Saldo em conta'
+        frases_ignorar = [
+            'SALDO DO DIA','SALDO ANTERIOR','SALDO ATUAL','SALDO FINAL',
+            'Saldo bloqueado anterior','Saldo bloqueado','Saldo disponível','Saldo em conta'
         ]
-        
-        linhas_antes_filtro = len(df_extrato_consolidado)
-        
-        for frase in frases_a_ignorar:
+        for f in frases_ignorar:
             df_extrato_consolidado = df_extrato_consolidado[
-                ~df_extrato_consolidado['HISTORICO'].str.contains(frase, case=False, na=False)
+                ~df_extrato_consolidado['HISTORICO'].str.contains(f, case=False, na=False)
             ]
-        
-        linhas_filtradas = linhas_antes_filtro - len(df_extrato_consolidado)
 
         # --- 5. PROCESSAMENTO DOS VALORES ---
         df_extrato_consolidado = df_extrato_consolidado.dropna(subset=['DATA'])
-        df_extrato_consolidado['HISTORICO'] = df_extrato_consolidado['HISTORICO'].str.replace(r'\s+', ' ', regex=True).str.strip()
-        
-        valores_processados = []
-        valores_validos = 0
-        valores_credito_ignorados = 0
-        
-        for index, row in df_extrato_consolidado.iterrows():
-            valor_original = row['VALOR']
-            valor_processado = processar_formato_valor_sicoob(valor_original)
-            valores_processados.append(valor_processado)
-            
-            if valor_processado is not None:
-                valores_validos += 1
-            elif str(valor_original).strip() and 'C' in str(valor_original).upper():
-                valores_credito_ignorados += 1
-        
-        df_extrato_consolidado['VALOR_PROCESSADO'] = valores_processados
-        
-        # --- 6. FILTRAR APENAS VALORES DE DÉBITO VÁLIDOS ---
+        df_extrato_consolidado['HISTORICO'] = (
+            df_extrato_consolidado['HISTORICO'].str.replace(r'\s+', ' ', regex=True).str.strip()
+        )
+        df_extrato_consolidado['VALOR_PROCESSADO'] = [
+            processar_formato_valor_sicoob(v) for v in df_extrato_consolidado['VALOR']
+        ]
+
+        # --- 6. APENAS DÉBITOS VÁLIDOS ---
         df_extrato_debitos = df_extrato_consolidado[df_extrato_consolidado['VALOR_PROCESSADO'].notna()].copy()
-        
         if df_extrato_debitos.empty:
             if mostrar_detalhes:
-                print("⚠️ Nenhuma transação de débito válida foi encontrada no extrato.")
-            return {
-                'sucesso': True,
-                'transacoes_processadas': transacoes_processadas,
-                'debitos_encontrados': 0,
-                'novos_lancamentos': 0,
-                'duplicatas_ignoradas': 0
-            }
-        
+                print("⚠️ Nenhuma transação de débito válida encontrada.")
+            return {'sucesso': True, 'transacoes_processadas': transacoes_processadas,
+                    'debitos_encontrados': 0, 'novos_lancamentos': 0, 'duplicatas_ignoradas': 0}
+
         # --- 7. MAPEAMENTO PARA A ESTRUTURA DA PLANILHA ---
         novos_lancamentos = pd.DataFrame({
             'Data Vencimento': df_extrato_debitos['DATA'],
@@ -602,38 +524,34 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
             'Observação (opcional)': df_extrato_debitos['HISTORICO']
         })
 
-        # --- 8. PREVENÇÃO DE DUPLICIDADE ---
-        colunas_para_comparar = ['Data Vencimento', 'Descrição', 'Valor']
-        df_banco_temp = df_banco.dropna(subset=colunas_para_comparar).copy()
-        novos_lancamentos_temp = novos_lancamentos.dropna(subset=colunas_para_comparar).copy()
-        
-        # Normalizar datas para comparação
+        # --- 8. PREVENÇÃO DE DUPLICIDADE (comparando com o que já está em Banco) ---
+        col_cmp = ['Data Vencimento','Descrição','Valor']
+        df_banco_temp = df_banco.dropna(subset=col_cmp).copy()
+        novos_temp = novos_lancamentos.dropna(subset=col_cmp).copy()
+
         try:
             df_banco_temp['Data Vencimento'] = pd.to_datetime(df_banco_temp['Data Vencimento'], dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y')
-            novos_lancamentos_temp['Data Vencimento'] = pd.to_datetime(novos_lancamentos_temp['Data Vencimento'], dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y')
-        except:
+            novos_temp['Data Vencimento'] = pd.to_datetime(novos_temp['Data Vencimento'], dayfirst=True, errors='coerce').dt.strftime('%d/%m/%Y')
+        except Exception:
             pass
-        
-        # Criar ID único para comparação
+
         df_banco_temp['ID'] = (
             df_banco_temp['Data Vencimento'].astype(str).str.strip() + '|' +
             df_banco_temp['Descrição'].astype(str).str.strip().str.lower() + '|' +
             df_banco_temp['Valor'].astype(str)
         )
-
-        novos_lancamentos_temp['ID'] = (
-            novos_lancamentos_temp['Data Vencimento'].astype(str).str.strip() + '|' +
-            novos_lancamentos_temp['Descrição'].astype(str).str.strip().str.lower() + '|' +
-            novos_lancamentos_temp['Valor'].astype(str)
+        novos_temp['ID'] = (
+            novos_temp['Data Vencimento'].astype(str).str.strip() + '|' +
+            novos_temp['Descrição'].astype(str).str.strip().str.lower() + '|' +
+            novos_temp['Valor'].astype(str)
         )
 
-        novos_lancamentos_sem_duplicatas = novos_lancamentos[~novos_lancamentos_temp['ID'].isin(df_banco_temp['ID'])].copy()
-        
+        novos_lancamentos_sem_duplicatas = novos_lancamentos[~novos_temp['ID'].isin(df_banco_temp['ID'])].copy()
         duplicatas_encontradas = len(novos_lancamentos) - len(novos_lancamentos_sem_duplicatas)
-        
+
         if novos_lancamentos_sem_duplicatas.empty:
             if mostrar_detalhes:
-                print("ℹ️ Não há novas transações para adicionar. Todas já existem na planilha.")
+                print("ℹ️ Não há novos lançamentos a adicionar (todos já existem em Banco).")
             return {
                 'sucesso': True,
                 'transacoes_processadas': transacoes_processadas,
@@ -641,27 +559,27 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
                 'novos_lancamentos': 0,
                 'duplicatas_ignoradas': duplicatas_encontradas
             }
-            
-        # --- 9. ADICIONANDO OS DADOS PRESERVANDO FORMATAÇÃO ---
-        sucesso_formatacao = adicionar_dados_preservando_formatacao(
-            caminho_planilha_usuario, 
-            novos_lancamentos_sem_duplicatas
-        )
-        
-        if not sucesso_formatacao:
-            # Fallback: usar pandas se falhar a preservação de formatação
-            if mostrar_detalhes:
-                print("⚠️ Fallback: usando método padrão sem preservar formatação completa")
-            all_sheets = pd.read_excel(caminho_planilha_usuario, sheet_name=None, engine='openpyxl')
-            df_banco_atualizado = pd.concat([df_banco, novos_lancamentos_sem_duplicatas], ignore_index=True)
 
-            # Salvar na planilha preservando outras abas
-            with pd.ExcelWriter(caminho_planilha_usuario, engine='openpyxl', mode='w') as writer:
-                df_banco_atualizado.to_excel(writer, sheet_name='Banco', index=False)
-                for sheet_name, df_sheet in all_sheets.items():
-                    if sheet_name != 'Banco':
-                        df_sheet.to_excel(writer, sheet_name=sheet_name, index=False)
-        
+        # --- 9. ESCREVER APENAS NA ABA 'Banco' (sem tocar 'Base de dados') ---
+        from openpyxl import load_workbook
+        from openpyxl.utils.dataframe import dataframe_to_rows
+
+        wb = load_workbook(caminho_planilha_usuario)
+
+        if "Banco" in wb.sheetnames:
+            ws_banco = wb["Banco"]
+            # não escrevemos cabeçalho novamente
+        else:
+            ws_banco = wb.create_sheet("Banco")
+            # cria cabeçalho uma única vez
+            ws_banco.append(list(novos_lancamentos_sem_duplicatas.columns))
+
+        # acrescenta apenas as linhas de dados (sem header)
+        for r in dataframe_to_rows(novos_lancamentos_sem_duplicatas, index=False, header=False):
+            ws_banco.append(r)
+
+        wb.save(caminho_planilha_usuario)
+
         return {
             'sucesso': True,
             'transacoes_processadas': transacoes_processadas,
@@ -669,7 +587,7 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
             'novos_lancamentos': len(novos_lancamentos_sem_duplicatas),
             'duplicatas_ignoradas': duplicatas_encontradas
         }
-        
+
     except Exception as e:
         return {
             'sucesso': False,
@@ -679,6 +597,8 @@ def processar_extrato_individual(caminho_extrato, caminho_planilha_usuario, most
             'novos_lancamentos': 0,
             'duplicatas_ignoradas': 0
         }
+
+
 
 def processar_multiplos_extratos():
     """
@@ -788,7 +708,7 @@ def processar_multiplos_extratos():
             else:
                 caminho_planilha_criada = caminho_planilha
                 # Copia template para o destino
-                caminho_template = obter_caminho_recurso('Automacao_Gransoft.xlsx')
+                caminho_template = obter_caminho_recurso('Automação_Gransoft.xlsx')
                 if os.path.exists(caminho_template):
                     shutil.copy2(caminho_template, caminho_planilha_criada)
                 else:
@@ -885,7 +805,7 @@ def criar_nova_planilha_silenciosa(caminho_destino):
     """
     try:
         # Obtém o caminho do template embutido
-        caminho_template = obter_caminho_recurso('Automacao_Gransoft.xlsx')
+        caminho_template = obter_caminho_recurso('Automação_Gransoft.xlsx')
         
         if not os.path.exists(caminho_template):
             # Se não encontrar o template embutido, cria um básico

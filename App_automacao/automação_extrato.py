@@ -22,6 +22,7 @@ import sys
 from datetime import datetime
 import shutil
 from pathlib import Path
+from copy import copy 
 
 def verificar_dependencias():
     """Verifica se as bibliotecas necessárias estão instaladas"""
@@ -216,15 +217,18 @@ def processar_formato_valor_sicoob(valor_str):
 
 def adicionar_dados_preservando_formatacao(caminho_planilha, novos_dados):
     """
-    Adiciona novos dados à planilha preservando toda a formatação original
+    Adiciona novos dados à planilha preservando toda a formatação original.
+    Inclui tratamento de erro para arquivos bloqueados.
     """
     try:
         from openpyxl import load_workbook
         from openpyxl.styles import NamedStyle
         from openpyxl.utils import get_column_letter
-        
+        import tkinter as tk
+        from tkinter import messagebox
+
         print("🎨 Carregando planilha preservando formatação...")
-        
+
         # Carrega a planilha mantendo formatação
         wb = load_workbook(caminho_planilha)
         ws = wb['Banco']
@@ -296,15 +300,13 @@ def adicionar_dados_preservando_formatacao(caminho_planilha, novos_dados):
                     cell_origem = ws.cell(row=linha_formato_referencia, column=col)
                     cell_destino = ws.cell(row=linha_atual, column=col)
                     
-                    # Copia formatação (exceto número que já definimos)
-                    if cell_origem.font:
-                        cell_destino.font = cell_origem.font
-                    if cell_origem.border:
-                        cell_destino.border = cell_origem.border
-                    if cell_origem.fill:
-                        cell_destino.fill = cell_origem.fill
-                    if cell_origem.alignment:
-                        cell_destino.alignment = cell_origem.alignment
+                    # Copia apenas os atributos de estilo que não causam problemas
+                    cell_destino.font = copy(cell_origem.font)
+                    cell_destino.border = copy(cell_origem.border)
+                    cell_destino.fill = copy(cell_origem.fill)
+                    cell_destino.alignment = copy(cell_origem.alignment)
+
+# ... (restante do código)
         
         # Ajusta largura das colunas se necessário
         for column in ws.columns:
@@ -321,11 +323,28 @@ def adicionar_dados_preservando_formatacao(caminho_planilha, novos_dados):
             adjusted_width = min(max_length + 2, 50)  # Máximo de 50
             ws.column_dimensions[column_letter].width = adjusted_width
         
-        # Salva a planilha
-        wb.save(caminho_planilha)
-        print(f"✅ Dados adicionados preservando formatação original!")
-        
-        return True
+        # Salva a planilha com tratamento de erro
+        try:
+            wb.save(caminho_planilha)
+            print(f"✅ Dados adicionados preservando formatação original!")
+            return True
+        except PermissionError:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "Erro de Permissão",
+                f"❌ Erro: A planilha '{os.path.basename(caminho_planilha)}' está aberta.\n\n"
+                "Por favor, feche o arquivo e tente novamente."
+            )
+            return False
+        except Exception as e:
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror(
+                "Erro ao Salvar",
+                f"❌ Erro inesperado ao salvar a planilha: {e}"
+            )
+            return False
         
     except Exception as e:
         print(f"❌ Erro ao preservar formatação: {e}")
@@ -820,6 +839,124 @@ def criar_nova_planilha_silenciosa(caminho_destino):
         print(f"❌ Erro ao criar planilha: {e}")
         raise
 
+def processar_extrato_novo_formato(caminho_extrato, caminho_planilha_usuario, mostrar_detalhes=True):
+    """
+    Processa um extrato no novo formato (ignora as 2 primeiras linhas, colunas C e E)
+    e adiciona apenas débitos na aba 'Banco'.
+    """
+    try:
+        if mostrar_detalhes:
+            print(f"🔄 Processando extrato no novo formato: {os.path.basename(caminho_extrato)}")
+
+        # 1. LEITURA ROBUSTA DO EXTRATO (pulando as 2 primeiras linhas)
+        try:
+            # A imagem mostra um arquivo Excel. Vamos priorizar a leitura de Excel.
+            df_extrato = pd.read_excel(caminho_extrato, skiprows=2)
+            if mostrar_detalhes:
+                print("✅ Arquivo lido como Excel.")
+        except Exception as e:
+            if mostrar_detalhes:
+                print(f"❌ Erro ao ler como Excel: {e}. Tentando como CSV...")
+            # Tenta ler como CSV caso a leitura de Excel falhe
+            df_extrato = pd.read_csv(caminho_extrato, skiprows=2, encoding='utf-8', sep=';')
+
+        if df_extrato.empty:
+            raise ValueError("Arquivo vazio ou sem dados válidos após pular as primeiras linhas.")
+
+        # 2. SELEÇÃO E RENOMEAÇÃO DAS COLUNAS NECESSÁRIAS
+        # Conforme a imagem, as colunas necessárias são:
+        # A (Data) -> Data Vencimento
+        # B (Histórico) -> Descrição, Observação
+        # D (Valor (R$)) -> Valor
+        
+        # O DataFrame já está lendo a partir da 3ª linha (índice 2).
+        # As colunas originais do extrato são (A, B, C, D, E).
+        # Vamos pegar as colunas de índice 0, 1 e 3
+        
+        colunas_extrato = df_extrato.columns
+        if len(colunas_extrato) < 4:
+            raise ValueError(f"Estrutura inesperada com {len(colunas_extrato)} colunas. Mínimo de 4 esperadas.")
+            
+        df_extrato_selecionado = df_extrato.iloc[:, [0, 1, 3]].copy()
+        df_extrato_selecionado.columns = ['Data', 'Historico', 'Valor']
+
+        df_extrato_selecionado = df_extrato_selecionado.dropna(how='all')
+        if df_extrato_selecionado.empty:
+            raise ValueError("Sem dados válidos após limpeza e seleção de colunas.")
+
+        # 3. FILTRAGEM DE VALORES POSITIVOS (APENAS DÉBITOS)
+        # Assumindo que valores positivos são créditos e devem ser ignorados.
+        df_extrato_debitos = df_extrato_selecionado[df_extrato_selecionado['Valor'] < 0].copy()
+        
+        if df_extrato_debitos.empty:
+            if mostrar_detalhes:
+                print("⚠️ Nenhuma transação de débito encontrada.")
+            return {'sucesso': True, 'transacoes_processadas': len(df_extrato_selecionado),
+                    'debitos_encontrados': 0, 'novos_lancamentos': 0, 'duplicatas_ignoradas': 0}
+
+        # Remove o sinal negativo para que o valor seja salvo como positivo
+        df_extrato_debitos['Valor'] = df_extrato_debitos['Valor'].abs()
+
+        # 4. MAPEAMENTO PARA A ESTRUTURA DA PLANILHA 'Banco'
+        novos_lancamentos = pd.DataFrame({
+            'Data Vencimento': df_extrato_debitos['Data'],
+            'Descrição': df_extrato_debitos['Historico'],
+            'Valor': df_extrato_debitos['Valor'],
+            'Fornecedor': '',
+            'Numero Docto': '',
+            'Conta Contábil': '',
+            'Observação (opcional)': df_extrato_debitos['Historico']
+        })
+
+        # 5. PREVENÇÃO DE DUPLICIDADE (comparando com a planilha de destino)
+        try:
+            df_banco = pd.read_excel(caminho_planilha_usuario, sheet_name='Banco', engine='openpyxl')
+        except Exception:
+            df_banco = pd.DataFrame(columns=novos_lancamentos.columns)
+
+        col_cmp = ['Data Vencimento', 'Descrição', 'Valor']
+        df_banco_temp = df_banco.dropna(subset=col_cmp).copy()
+        novos_temp = novos_lancamentos.dropna(subset=col_cmp).copy()
+
+        df_banco_temp['ID'] = (
+            df_banco_temp['Data Vencimento'].astype(str).str.strip() + '|' +
+            df_banco_temp['Descrição'].astype(str).str.strip().str.lower() + '|' +
+            df_banco_temp['Valor'].astype(str)
+        )
+        novos_temp['ID'] = (
+            novos_temp['Data Vencimento'].astype(str).str.strip() + '|' +
+            novos_temp['Descrição'].astype(str).str.strip().str.lower() + '|' +
+            novos_temp['Valor'].astype(str)
+        )
+
+        novos_lancamentos_sem_duplicatas = novos_lancamentos[~novos_temp['ID'].isin(df_banco_temp['ID'])].copy()
+        duplicatas_encontradas = len(novos_lancamentos) - len(novos_lancamentos_sem_duplicatas)
+
+        if novos_lancamentos_sem_duplicatas.empty:
+            if mostrar_detalhes:
+                print("ℹ️ Não há novos lançamentos a adicionar (todos já existem em Banco).")
+            return {
+                'sucesso': True,
+                'transacoes_processadas': len(df_extrato_selecionado),
+                'debitos_encontrados': len(df_extrato_debitos),
+                'novos_lancamentos': 0,
+                'duplicatas_ignoradas': duplicatas_encontradas
+            }
+
+        # 6. ESCREVER APENAS NA ABA 'Banco'
+        adicionar_dados_preservando_formatacao(caminho_planilha_usuario, novos_lancamentos_sem_duplicatas)
+
+        return {
+            'sucesso': True,
+            'transacoes_processadas': len(df_extrato_selecionado),
+            'debitos_encontrados': len(df_extrato_debitos),
+            'novos_lancamentos': len(novos_lancamentos_sem_duplicatas),
+            'duplicatas_ignoradas': duplicatas_encontradas
+        }
+
+    except Exception as e:
+        return {'sucesso': False, 'erro': str(e)}
+    
 def processar_extrato_unico():
     """
     Processa um único extrato (modo tradicional)
@@ -889,14 +1026,68 @@ def processar_extrato_unico():
     else:
         messagebox.showerror("Erro", f"❌ Erro no processamento:\n\n{resultado.get('erro', 'Erro desconhecido')}")
         return False
+    
+def chamar_processar_novo_formato():
+    """
+    Função de chamada para o novo formato de extrato.
+    """
+    root = tk.Tk()
+    root.withdraw()
 
+    print("📄 Processamento Individual - Novo Formato")
+    print("=" * 60)
+
+    # Passo 1: Criar nova planilha
+    print("📁 Primeiro, vamos criar sua planilha de controle...")
+    caminho_planilha_usuario = criar_planilha_usuario()
+
+    if not caminho_planilha_usuario:
+        messagebox.showinfo("Cancelado", "Operação cancelada. Nenhuma planilha foi criada.")
+        return False
+
+    # Passo 2: Selecionar extrato
+    print("📄 Agora, selecione seu extrato no novo formato...")
+    caminho_extrato = filedialog.askopenfilename(
+        title="Selecione o arquivo de extrato no novo formato",
+        filetypes=[("Arquivos Excel/CSV", "*.xlsx;*.xls;*.csv")]
+    )
+
+    if not caminho_extrato:
+        messagebox.showinfo("Cancelado", "Operação cancelada. Nenhum arquivo de extrato foi selecionado.")
+        return False
+
+    print(f"✅ Planilha criada: {os.path.basename(caminho_planilha_usuario)}")
+    print(f"✅ Extrato selecionado: {os.path.basename(caminho_extrato)}")
+    print("🔄 Iniciando processamento...")
+
+    # Processa o extrato com a nova função
+    resultado = processar_extrato_novo_formato(caminho_extrato, caminho_planilha_usuario, mostrar_detalhes=True)
+
+    if resultado['sucesso']:
+        messagebox.showinfo(
+            "Sucesso!",
+            f"✅ Processamento concluído com sucesso!\n\n"
+            f"📊 Transações processadas: {resultado['transacoes_processadas']}\n"
+            f"💰 Débitos encontrados: {resultado['debitos_encontrados']}\n"
+            f"➕ Novos lançamentos adicionados: {resultado['novos_lancamentos']}\n"
+            f"🔍 Duplicatas ignoradas: {resultado['duplicatas_ignoradas']}\n\n"
+            f"📁 Planilha salva em:\n{os.path.basename(caminho_planilha_usuario)}\n\n"
+            f"Deseja abrir a planilha agora?"
+        )
+        if messagebox.askyesno("Abrir Planilha", "Deseja abrir a planilha agora?"):
+            os.startfile(caminho_planilha_usuario)
+        return True
+    else:
+        messagebox.showerror("Erro", f"❌ Erro no processamento:\n\n{resultado.get('erro', 'Erro desconhecido')}")
+        return False
+    
 def criar_menu_principal():
     """
     Cria menu principal com opções de processamento
     """
     # Janela principal
     root = tk.Tk()
-    root.title("🏠 Automação Sicoob v2.1")
+    root.title("🏠 Automação Extrato (Sicoob e Santander)")
     root.geometry("600x450")
     root.resizable(False, False)
     
@@ -914,8 +1105,8 @@ def criar_menu_principal():
     frame_principal.pack(fill=tk.BOTH, expand=True)
     
     # Título
-    label_titulo = tk.Label(frame_principal, text="🚀 AUTOMAÇÃO SICOOB", 
-                           font=('Arial', 22, 'bold'), fg='#2E7D32', bg='#f5f5f5')
+    label_titulo = tk.Label(frame_principal, text="🚀 AUTOMAÇÃO EXTRATO", 
+                           font=('Arial', 22, 'bold'), fg='#2196F3', bg='#f5f5f5')
     label_titulo.pack(pady=(0, 10))
     
     label_subtitulo = tk.Label(frame_principal, text="Processamento Avançado de Extratos Bancários", 
@@ -935,27 +1126,40 @@ def criar_menu_principal():
         'cursor': 'hand2'
     }
     
-    # Botão processamento único
-    btn_unico = tk.Button(frame_botoes, text="📄 Processar Extrato Único", 
-                         command=lambda: [root.destroy(), processar_extrato_unico()],
-                         bg='#4CAF50', fg='white', **btn_style)
-    btn_unico.pack(pady=8)
+    # Botão processamento único (Sicoob original)
+    btn_unico_sicoob = tk.Button(frame_botoes, text="📄 Processar Extrato Sicoob Padrão", 
+                              command=lambda: [root.destroy(), processar_extrato_unico()],
+                              bg='#4CAF50', fg='white', **btn_style)
+    btn_unico_sicoob.pack(pady=8)
     
-    # Descrição do botão único
-    desc_unico = tk.Label(frame_botoes, 
-                         text="Processa um extrato e cria uma planilha personalizada", 
-                         font=('Arial', 10), fg='#666', bg='#f5f5f5')
-    desc_unico.pack(pady=(0, 15))
+    # Descrição do botão Sicoob
+    desc_sicoob = tk.Label(frame_botoes, 
+                          text="Formato de extrato apenas para Sicoob", 
+                          font=('Arial', 10), fg='#666', bg='#f5f5f5')
+    desc_sicoob.pack(pady=(0, 15))
     
+    # Novo botão para o novo formato
+    btn_novo_formato = tk.Button(frame_botoes, text="📄 Processar Extrato Santander",
+                                command=lambda: [root.destroy(), chamar_processar_novo_formato()],
+                                bg="#CA1B1B", fg='white', **btn_style)
+    btn_novo_formato.pack(pady=8)
+    
+    # Descrição do novo botão
+    desc_novo_formato = tk.Label(frame_botoes,
+                                 text="Formato de extrato apenas para Santander",
+                                 font=('Arial', 10), fg='#666', bg='#f5f5f5')
+    desc_novo_formato.pack(pady=(0, 15))
+
     # Botão processamento múltiplo
-    btn_multiplo = tk.Button(frame_botoes, text="📁 Processar Múltiplos Extratos", 
-                            command=lambda: [root.destroy(), processar_multiplos_extratos()],
-                            bg='#2196F3', fg='white', **btn_style)
+    btn_multiplo = tk.Button(frame_botoes, text="📁 Processar multiplos extratos", 
+                             command=lambda: [root.destroy(), processar_multiplos_extratos()],
+                             bg='#2196F3', fg='white', **btn_style)
     btn_multiplo.pack(pady=8)
+    
     
     # Descrição do botão múltiplo
     desc_multiplo = tk.Label(frame_botoes, 
-                            text="Processa vários extratos, cada um em uma planilha separada", 
+                            text="Escolha extratos apenas do mesmo banco", 
                             font=('Arial', 10), fg='#666', bg='#f5f5f5')
     desc_multiplo.pack(pady=(0, 20))
     
@@ -975,19 +1179,22 @@ def criar_menu_principal():
                      font=('Arial', 9), fg='#999', bg='#f5f5f5')
     rodape.pack(side=tk.BOTTOM, pady=10)
     
-    # Efeitos de hover nos botões
+
     def on_enter(e, cor_hover):
         e.widget.config(bg=cor_hover)
-    
+
     def on_leave(e, cor_original):
         e.widget.config(bg=cor_original)
-    
-    btn_unico.bind("<Enter>", lambda e: on_enter(e, '#45a049'))
-    btn_unico.bind("<Leave>", lambda e: on_leave(e, '#4CAF50'))
-    
+
+    # CORREÇÃO: Usar o novo nome da variável
+    btn_unico_sicoob.bind("<Enter>", lambda e: on_enter(e, '#45a049'))
+    btn_unico_sicoob.bind("<Leave>", lambda e: on_leave(e, '#4CAF50'))
+
+    # Mantenha o código para o botão de processamento múltiplo
     btn_multiplo.bind("<Enter>", lambda e: on_enter(e, '#1976D2'))
     btn_multiplo.bind("<Leave>", lambda e: on_leave(e, '#2196F3'))
     
+        
     return root
 
 def main():
@@ -1004,17 +1211,26 @@ def main():
     try:
         # Criar e executar menu principal
         app = criar_menu_principal()
+
+        def on_closing():
+            """Função chamada ao fechar a janela para garantir o encerramento."""
+            print("\n👋 Fechando a aplicação...")
+            app.destroy()
+            sys.exit()
+
+        app.protocol("WM_DELETE_WINDOW", on_closing)
         app.mainloop()
         
     except Exception as e:
         print(f"❌ Erro inesperado: {e}")
         import traceback
         traceback.print_exc()
-        
+    
     finally:
         print("\n" + "=" * 60)
         print("👋 Obrigado por usar a Automação Sicoob!")
-        input("\nPressione ENTER para sair...")
+        # A linha abaixo pode ser removida se sys.exit() for usada
+        # input("\nPressione ENTER para sair...")
 
 if __name__ == "__main__":
     main()
